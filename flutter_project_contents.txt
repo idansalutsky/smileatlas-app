@@ -1,0 +1,2461 @@
+
+==================================================
+File: lib\main.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import 'package:easy_localization/easy_localization.dart'; // <-- important
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
+import 'src/app.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Load environment variables
+  await dotenv.load(fileName: ".env");
+
+  // Initialize easy localization
+  await EasyLocalization.ensureInitialized();
+
+  // Initialize Firebase
+  await Firebase.initializeApp(
+    options: FirebaseOptions(
+      apiKey: dotenv.env['FIREBASE_API_KEY'] ?? '',
+      appId: dotenv.env['FIREBASE_APP_ID'] ?? '',
+      messagingSenderId: dotenv.env['FIREBASE_MESSAGING_SENDER_ID'] ?? '',
+      projectId: dotenv.env['FIREBASE_PROJECT_ID'] ?? '',
+      storageBucket: dotenv.env['FIREBASE_STORAGE_BUCKET'] ?? '',
+    ),
+  );
+
+  runApp(
+    EasyLocalization(
+      supportedLocales: const [
+        Locale('en'),
+        Locale('es'),
+        Locale('he'),
+        Locale('ru'),
+      ],
+      path: 'assets/languages', // Folder with JSON files
+      fallbackLocale: const Locale('en'),
+      child: const MyApp(),
+    ),
+  );
+}
+
+==================================================
+File: lib\src\app.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:easy_localization/easy_localization.dart'; // for tr(), etc.
+
+import 'routes/app_routes.dart';
+import 'providers/user_provider.dart';
+import 'providers/family_provider.dart';
+import 'providers/dental_analysis_provider.dart';
+import 'providers/dental_image_provider.dart';
+import 'utils/constants.dart';
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key}); // constructor
+
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => UserProvider()),
+        ChangeNotifierProvider(create: (_) => FamilyProvider()),
+        ChangeNotifierProvider(create: (_) => DentalAnalysisProvider()),
+        ChangeNotifierProvider(create: (_) => DentalImageProvider()),
+      ],
+      child: MaterialApp(
+        title: tr('app_title'), // <--- from your JSONs
+        debugShowCheckedModeBanner: false,
+
+        // easy_localization settings
+        locale: context.locale,
+        supportedLocales: context.supportedLocales,
+        localizationsDelegates: context.localizationDelegates,
+
+        theme: ThemeData(
+          primaryColor: AppColors.primary,
+          colorScheme: const ColorScheme.light(secondary: AppColors.accent),
+          scaffoldBackgroundColor: AppColors.background,
+          textTheme: const TextTheme(
+            titleLarge: AppTypography.header,
+            bodyMedium: AppTypography.body,
+          ),
+        ),
+        initialRoute: AppRoutes.onboarding,
+        routes: AppRoutes.routes,
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\models\dental_analysis.dart
+==================================================
+
+import 'package:flutter/material.dart';
+
+/// Represents a single tooth and its analysis data.
+class Tooth {
+  final String toothClass;
+  final String groupClass;
+  final String jaw;
+  final String quadrant;
+  final String professionalName;
+  final List<double> bbox;      // [x, y, width, height]
+  final List<double> groupBbox; // [x, y, width, height] for a group of teeth
+  final double confidence;
+  final int imageIndex;
+  final String imageName;
+
+  Tooth({
+    required this.toothClass,
+    required this.groupClass,
+    required this.jaw,
+    required this.quadrant,
+    required this.professionalName,
+    required this.bbox,
+    required this.groupBbox,
+    required this.confidence,
+    required this.imageIndex,
+    required this.imageName,
+  });
+
+  factory Tooth.fromJson(Map<String, dynamic> json) {
+    return Tooth(
+      toothClass: json["tooth_class"],
+      groupClass: json["group_class"],
+      jaw: json["jaw"],
+      quadrant: json["quadrant"].toString(),
+      professionalName: json["professional_name"],
+      bbox: List<double>.from(json["bbox"].map((x) => (x as num).toDouble())),
+      groupBbox: List<double>.from(json["group_bbox"].map((x) => (x as num).toDouble())),
+      confidence: (json["confidence"] as num).toDouble(),
+      imageIndex: json["image_index"],
+      imageName: json["image_name"],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      "tooth_class": toothClass,
+      "group_class": groupClass,
+      "jaw": jaw,
+      "quadrant": quadrant,
+      "professional_name": professionalName,
+      "bbox": bbox,
+      "group_bbox": groupBbox,
+      "confidence": confidence,
+      "image_index": imageIndex,
+      "image_name": imageName,
+    };
+  }
+}
+
+/// Represents the entire dental analysis for a set of images.
+class DentalAnalysis {
+  final List<Tooth> teeth;
+  /// Computed markers (relative offsets) for display on a dental map.
+  final List<Offset> markers;
+
+  DentalAnalysis({required this.teeth, required this.markers});
+
+  factory DentalAnalysis.fromJson(Map<String, dynamic> json) {
+    List<Tooth> teethList = (json["teeth"] as List)
+        .map((toothJson) => Tooth.fromJson(toothJson))
+        .toList();
+
+    // Compute center points for each tooth based on its bounding box.
+    List<Offset> computedMarkers = teethList.map((tooth) {
+      double x = tooth.bbox[0];
+      double y = tooth.bbox[1];
+      double width = tooth.bbox[2];
+      double height = tooth.bbox[3];
+      return Offset(x + width / 2, y + height / 2);
+    }).toList();
+
+    return DentalAnalysis(teeth: teethList, markers: computedMarkers);
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      "teeth": teeth.map((tooth) => tooth.toJson()).toList(),
+      // Markers are typically used for UI display; include them if needed.
+      "markers": markers.map((offset) => {"dx": offset.dx, "dy": offset.dy}).toList(),
+    };
+  }
+}
+
+==================================================
+File: lib\src\models\dental_image.dart
+==================================================
+
+import 'package:flutter/foundation.dart';
+
+enum DentalImageType {
+  front,
+  upper,
+  lower,
+  other
+}
+
+extension DentalImageTypeExtension on DentalImageType {
+  String get value {
+    switch (this) {
+      case DentalImageType.front:
+        return 'front';
+      case DentalImageType.upper:
+        return 'upper';
+      case DentalImageType.lower:
+        return 'lower';
+      case DentalImageType.other:
+        return 'other';
+    }
+  }
+  
+  static DentalImageType fromString(String value) {
+    switch (value.toLowerCase()) {
+      case 'front':
+        return DentalImageType.front;
+      case 'upper':
+        return DentalImageType.upper;
+      case 'lower':
+        return DentalImageType.lower;
+      default:
+        return DentalImageType.other;
+    }
+  }
+}
+
+@immutable
+class DentalImage {
+  final String id;
+  final String url;
+  final DentalImageType type;
+  final DateTime captureDate;
+  final String memberId;
+  final Map<String, dynamic>? metadata;
+  final String? localPath;
+  final bool isProcessed;
+  final String? analysisId;
+
+  const DentalImage({
+    required this.id,
+    required this.url,
+    required this.type,
+    required this.captureDate,
+    required this.memberId,
+    this.metadata,
+    this.localPath,
+    this.isProcessed = false,
+    this.analysisId,
+  });
+
+  DentalImage copyWith({
+    String? id,
+    String? url,
+    DentalImageType? type,
+    DateTime? captureDate,
+    String? memberId,
+    Map<String, dynamic>? metadata,
+    String? localPath,
+    bool? isProcessed,
+    String? analysisId,
+  }) {
+    return DentalImage(
+      id: id ?? this.id,
+      url: url ?? this.url,
+      type: type ?? this.type,
+      captureDate: captureDate ?? this.captureDate,
+      memberId: memberId ?? this.memberId,
+      metadata: metadata ?? this.metadata,
+      localPath: localPath ?? this.localPath,
+      isProcessed: isProcessed ?? this.isProcessed,
+      analysisId: analysisId ?? this.analysisId,
+    );
+  }
+
+  factory DentalImage.fromJson(Map<String, dynamic> json) {
+    return DentalImage(
+      id: json['id'] as String,
+      url: json['url'] as String,
+      type: DentalImageTypeExtension.fromString(json['type'] as String),
+      captureDate: DateTime.parse(json['captureDate'] as String),
+      memberId: json['memberId'] as String,
+      metadata: json['metadata'] as Map<String, dynamic>?,
+      localPath: json['localPath'] as String?,
+      isProcessed: json['isProcessed'] as bool? ?? false,
+      analysisId: json['analysisId'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'url': url,
+      'type': type.value,
+      'captureDate': captureDate.toIso8601String(),
+      'memberId': memberId,
+      'metadata': metadata,
+      'localPath': localPath,
+      'isProcessed': isProcessed,
+      'analysisId': analysisId,
+    };
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DentalImage &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          url == other.url &&
+          type == other.type &&
+          captureDate == other.captureDate &&
+          memberId == other.memberId &&
+          isProcessed == other.isProcessed &&
+          analysisId == other.analysisId;
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      url.hashCode ^
+      type.hashCode ^
+      captureDate.hashCode ^
+      memberId.hashCode ^
+      isProcessed.hashCode ^
+      analysisId.hashCode;
+
+  @override
+  String toString() {
+    return 'DentalImage(id: $id, type: ${type.value}, memberId: $memberId, isProcessed: $isProcessed)';
+  }
+}
+==================================================
+File: lib\src\models\user.dart
+==================================================
+
+import 'dental_analysis.dart';
+
+class UserModel {
+  final String id;
+  final String name;
+  final String profileImage;
+  final DentalAnalysis? latestAnalysis;
+
+  UserModel({
+    required this.id,
+    required this.name,
+    required this.profileImage,
+    this.latestAnalysis,
+  });
+
+  factory UserModel.fromJson(Map<String, dynamic> json) {
+    return UserModel(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      profileImage: json['profileImage'] as String,
+      latestAnalysis: json['latestAnalysis'] != null
+          ? DentalAnalysis.fromJson(json['latestAnalysis'])
+          : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'profileImage': profileImage,
+      'latestAnalysis': latestAnalysis?.toJson(),
+    };
+  }
+}
+
+==================================================
+File: lib\src\providers\dental_analysis_provider.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import '../models/dental_analysis.dart';
+
+class DentalAnalysisProvider extends ChangeNotifier {
+  // Map key can be a member ID or image ID.
+  final Map<String, DentalAnalysis> _analysisResults = {};
+
+  Map<String, DentalAnalysis> get analysisResults => _analysisResults;
+
+  void setAnalysis(String key, DentalAnalysis analysis) {
+    _analysisResults[key] = analysis;
+    notifyListeners();
+  }
+
+  DentalAnalysis? getAnalysis(String key) {
+    return _analysisResults[key];
+  }
+
+  void clearAnalysis() {
+    _analysisResults.clear();
+    notifyListeners();
+  }
+}
+
+==================================================
+File: lib\src\providers\dental_image_provider.dart
+==================================================
+
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import '../models/dental_image.dart';
+import '../services/dental_image_service.dart';
+
+class DentalImageProvider extends ChangeNotifier {
+  final DentalImageService _imageService = DentalImageService();
+  
+  final Map<String, List<DentalImage>> _memberImages = {};
+  bool _isLoading = false;
+  String? _error;
+
+  bool get isLoading => _isLoading;
+  String? get error => _error;
+
+  List<DentalImage> getMemberImages(String memberId) {
+    return _memberImages[memberId] ?? [];
+  }
+
+  Future<void> loadMemberImages(String memberId) async {
+    _isLoading = true;
+    _error = null;
+    notifyListeners();
+
+    try {
+      final images = await _imageService.getMemberImages(memberId);
+      _memberImages[memberId] = images;
+    } catch (e) {
+      _error = e.toString();
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<DentalImage?> uploadImage({
+    required File imageFile,
+    required String memberId,
+    required DentalImageType type,
+    Map<String, dynamic>? metadata,
+  }) async {
+    _isLoading = true;
+    _error = null;
+    notifyListeners();
+
+    try {
+      final image = await _imageService.uploadImage(
+        imageFile: imageFile,
+        memberId: memberId,
+        type: type,
+        metadata: metadata,
+      );
+
+      // Update local state
+      if (_memberImages.containsKey(memberId)) {
+        _memberImages[memberId]!.insert(0, image);
+      } else {
+        _memberImages[memberId] = [image];
+      }
+
+      return image;
+    } catch (e) {
+      _error = e.toString();
+      return null;
+    } finally {
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> deleteImage(DentalImage image) async {
+    _error = null;
+    try {
+      await _imageService.deleteImage(image);
+      
+      // Update local state
+      if (_memberImages.containsKey(image.memberId)) {
+        _memberImages[image.memberId]!.removeWhere((img) => img.id == image.id);
+        notifyListeners();
+      }
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+    }
+  }
+
+  Future<void> markImageAsProcessed(String imageId, String analysisId) async {
+    _error = null;
+    try {
+      await _imageService.markImageAsProcessed(imageId, analysisId);
+      
+      // Update local state
+      for (var images in _memberImages.values) {
+        for (var i = 0; i < images.length; i++) {
+          if (images[i].id == imageId) {
+            images[i] = images[i].copyWith(
+              isProcessed: true,
+              analysisId: analysisId,
+            );
+            break;
+          }
+        }
+      }
+      notifyListeners();
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+    }
+  }
+
+  Future<List<DentalImage>> getUnprocessedImages() async {
+    _error = null;
+    try {
+      return await _imageService.getUnprocessedImages();
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+      return [];
+    }
+  }
+
+  void clearError() {
+    _error = null;
+    notifyListeners();
+  }
+
+  void clearCache() {
+    _memberImages.clear();
+    notifyListeners();
+  }
+}
+==================================================
+File: lib\src\providers\family_provider.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import '../models/user.dart';
+
+class FamilyProvider extends ChangeNotifier {
+  // Family Name
+  String _familyName = 'Our Family';
+  String get familyName => _familyName;
+
+  // Existing list of family members
+  List<UserModel> _familyMembers = [];
+  List<UserModel> get familyMembers => _familyMembers;
+
+  void setFamilyName(String newName) {
+    _familyName = newName;
+    notifyListeners();
+  }
+
+  void addMember(UserModel member) {
+    _familyMembers.add(member);
+    notifyListeners();
+  }
+
+  void removeMember(String memberId) {
+    _familyMembers.removeWhere((member) => member.id == memberId);
+    notifyListeners();
+  }
+
+  void updateMember(UserModel updatedMember) {
+    int index = _familyMembers.indexWhere((m) => m.id == updatedMember.id);
+    if (index != -1) {
+      _familyMembers[index] = updatedMember;
+      notifyListeners();
+    }
+  }
+}
+
+==================================================
+File: lib\src\providers\user_provider.dart
+==================================================
+
+// lib/src/providers/user_provider.dart
+import 'package:flutter/material.dart';
+import '../models/user.dart';
+
+class UserProvider extends ChangeNotifier {
+  UserModel? _currentUser;
+
+  UserModel? get currentUser => _currentUser;
+
+  void setUser(UserModel user) {
+    _currentUser = user;
+    notifyListeners();
+  }
+
+  void clearUser() {
+    _currentUser = null;
+    notifyListeners();
+  }
+}
+
+==================================================
+File: lib\src\routes\app_routes.dart
+==================================================
+
+// C:\Users\USER\smileatlas_app\lib\src\routes\app_routes.dart
+
+import 'package:flutter/material.dart';
+
+// Make sure this import path matches your actual project's structure:
+import 'package:smileatlas_app/src/models/user.dart';
+
+// Screens from your project (adjust import paths if necessary):
+import '../screens/onboarding_screen.dart';
+import '../screens/login_screen.dart';
+import '../screens/home_screen.dart';
+import '../screens/profile_screen.dart';
+import '../screens/upload_image_screen.dart';
+import '../screens/history_screen.dart';
+import '../screens/edit_family_screen.dart';
+import '../screens/add_edit_member_screen.dart';
+
+class AppRoutes {
+  static const String onboarding = '/onboarding';
+  static const String login = '/login';
+  static const String home = '/home';
+  static const String profile = '/profile';
+  static const String uploadImage = '/uploadImage';
+  static const String history = '/history';
+  static const String editFamily = '/editFamily';
+  static const String addEditMember = '/addEditMember';
+  static const String settings = '/settings';
+
+  static Map<String, WidgetBuilder> routes = {
+    onboarding: (context) => OnboardingScreen(),
+    login: (context) => LoginScreen(),
+    home: (context) => HomeScreen(),
+    history: (context) => HistoryScreen(),
+    editFamily: (context) => const EditFamilyScreen(),
+
+    // UploadImageScreen takes a String memberId
+    uploadImage: (context) {
+      final args = ModalRoute.of(context)!.settings.arguments;
+      final memberId = (args is String) ? args : 'unknown';
+      return UploadImageScreen(memberId: memberId);
+    },
+
+    // ProfileScreen optionally takes a UserModel? argument
+    profile: (context) {
+      final args = ModalRoute.of(context)!.settings.arguments;
+      if (args is UserModel) {
+        return ProfileScreen(member: args);
+      }
+      return const ProfileScreen(member: null);
+    },
+
+    // Add or edit a member (AddEditMemberScreen)
+    addEditMember: (context) {
+      final args = ModalRoute.of(context)!.settings.arguments;
+      if (args is UserModel) {
+        // Editing existing member
+        return AddEditMemberScreen(member: args);
+      }
+      // Otherwise, adding a new member
+      return const AddEditMemberScreen();
+    },
+  };
+}
+
+==================================================
+File: lib\src\screens\add_edit_member_screen.dart
+==================================================
+
+// lib/src/screens/add_edit_member_screen.dart
+
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:provider/provider.dart';
+import 'package:uuid/uuid.dart';
+import '../providers/family_provider.dart';
+import '../models/user.dart';
+import '../utils/constants.dart';
+
+class AddEditMemberScreen extends StatefulWidget {
+  final UserModel? member; // if null, we are adding
+
+  const AddEditMemberScreen({Key? key, this.member}) : super(key: key);
+
+  @override
+  State<AddEditMemberScreen> createState() => _AddEditMemberScreenState();
+}
+
+class _AddEditMemberScreenState extends State<AddEditMemberScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final ImagePicker _picker = ImagePicker();
+  File? _pickedImage;
+
+  late String _name;
+  late String _imagePath;
+
+  @override
+  void initState() {
+    super.initState();
+    // If we're editing, preload the name and image
+    if (widget.member != null) {
+      _name = widget.member!.name;
+      _imagePath = widget.member!.profileImage;
+    } else {
+      _name = '';
+      _imagePath = 'assets/images/default.png'; // or some fallback
+    }
+  }
+
+  Future<void> _pickImage() async {
+    final pickedFile = await _picker.pickImage(source: ImageSource.gallery);
+    if (pickedFile != null) {
+      setState(() {
+        _pickedImage = File(pickedFile.path);
+      });
+    }
+  }
+
+  void _saveMember() {
+    if (_formKey.currentState!.validate()) {
+      final familyProvider = Provider.of<FamilyProvider>(context, listen: false);
+
+      if (widget.member != null) {
+        // Editing existing member
+        final updated = UserModel(
+          id: widget.member!.id,
+          name: _name.trim(),
+          profileImage: _pickedImage?.path ?? _imagePath,
+          latestAnalysis: widget.member!.latestAnalysis,
+        );
+        familyProvider.updateMember(updated);
+      } else {
+        // Creating a new member
+        final newId = const Uuid().v4();
+        final newMember = UserModel(
+          id: newId,
+          name: _name.trim(),
+          profileImage: _pickedImage?.path ?? 'assets/images/default.png',
+          latestAnalysis: null,
+        );
+        familyProvider.addMember(newMember);
+      }
+
+      Navigator.pop(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEditing = widget.member != null;
+
+    return Scaffold(
+      appBar: AppBar(title: Text(isEditing ? "Edit Member" : "Add Member")),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(AppSpacing.medium),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              // Show picked image if available
+              if (_pickedImage != null)
+                Image.file(
+                  _pickedImage!,
+                  height: 100,
+                  width: 100,
+                  fit: BoxFit.cover,
+                )
+              else
+                Image.asset(
+                  _imagePath,
+                  height: 100,
+                  width: 100,
+                  fit: BoxFit.cover,
+                ),
+
+              const SizedBox(height: AppSpacing.small),
+              ElevatedButton(
+                onPressed: _pickImage,
+                child: const Text("Pick Profile Image"),
+              ),
+
+              const SizedBox(height: AppSpacing.medium),
+              TextFormField(
+                initialValue: _name,
+                decoration: const InputDecoration(labelText: 'Name'),
+                validator: (val) =>
+                    val == null || val.trim().isEmpty ? 'Please enter a name' : null,
+                onChanged: (val) => _name = val,
+              ),
+
+              const SizedBox(height: AppSpacing.large),
+              ElevatedButton(
+                onPressed: _saveMember,
+                child: Text(isEditing ? "Save Changes" : "Add Member"),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\screens\edit_family_screen.dart
+==================================================
+
+// lib/src/screens/edit_family_screen.dart
+
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../providers/family_provider.dart';
+import '../utils/constants.dart';
+
+class EditFamilyScreen extends StatefulWidget {
+  const EditFamilyScreen({Key? key}) : super(key: key);
+
+  @override
+  State<EditFamilyScreen> createState() => _EditFamilyScreenState();
+}
+
+class _EditFamilyScreenState extends State<EditFamilyScreen> {
+  final _formKey = GlobalKey<FormState>();
+  String _newName = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final familyProvider = Provider.of<FamilyProvider>(context, listen: false);
+    _newName = familyProvider.familyName;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text("Edit Family Name")),
+      body: Padding(
+        padding: const EdgeInsets.all(AppSpacing.medium),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              TextFormField(
+                initialValue: _newName,
+                decoration: const InputDecoration(labelText: 'Family Name'),
+                validator: (val) {
+                  if (val == null || val.trim().isEmpty) {
+                    return 'Please enter a family name';
+                  }
+                  return null;
+                },
+                onChanged: (val) => _newName = val.trim(),
+              ),
+              const SizedBox(height: AppSpacing.large),
+              ElevatedButton(
+                onPressed: () {
+                  if (_formKey.currentState!.validate()) {
+                    familyProvider.setFamilyName(_newName);
+                    Navigator.pop(context);
+                  }
+                },
+                child: const Text("Save"),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\screens\history_screen.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import '../utils/constants.dart';
+
+class HistoryScreen extends StatelessWidget {
+  const HistoryScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("Dental Analysis History")),
+      body: PageView(
+        children: [
+          CurrentAnalysisScreen(),
+          PastAnalysisScreen(),
+        ],
+      ),
+    );
+  }
+}
+
+class CurrentAnalysisScreen extends StatelessWidget {
+  const CurrentAnalysisScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    // Replace with production logic to fetch and display the current analysis.
+    return const Center(child: Text("Current Analysis Result", style: AppTypography.header));
+  }
+}
+
+class PastAnalysisScreen extends StatelessWidget {
+  const PastAnalysisScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    // Replace with production logic to display historical analysis.
+    return const Center(child: Text("Past Analysis History", style: AppTypography.header));
+  }
+}
+
+==================================================
+File: lib\src\screens\home_screen.dart
+==================================================
+
+// C:\Users\USER\smileatlas_app\lib\src\screens\home_screen.dart
+
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../providers/family_provider.dart';
+import '../routes/app_routes.dart';
+import '../widgets/profile_card.dart';
+import '../utils/constants.dart';
+
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final familyProvider = Provider.of<FamilyProvider>(context);
+    final familyMembers = familyProvider.familyMembers;
+
+    return Scaffold(
+      appBar: AppBar(
+        // Display the family name from provider
+        title: Text(familyProvider.familyName),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.edit),
+            onPressed: () {
+              // Navigate to edit the family name
+              Navigator.pushNamed(context, AppRoutes.editFamily);
+            },
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(AppSpacing.medium),
+        child: familyMembers.isEmpty
+            ? const Center(child: Text("No family members added yet."))
+            : GridView.builder(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: AppSpacing.medium,
+                  mainAxisSpacing: AppSpacing.medium,
+                ),
+                itemCount: familyMembers.length,
+                itemBuilder: (context, index) {
+                  final member = familyMembers[index];
+                  return ProfileCard(
+                    name: member.name,
+                    imagePath: member.profileImage,
+                    onTap: () {
+                      // Go to ProfileScreen, passing the member object
+                      Navigator.pushNamed(
+                        context,
+                        AppRoutes.profile,
+                        arguments: member,
+                      );
+                    },
+                  );
+                },
+              ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        // Go to add/edit member screen with no existing user => add new
+        onPressed: () {
+          Navigator.pushNamed(context, AppRoutes.addEditMember);
+        },
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\screens\login_screen.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import '../services/auth_service.dart';
+import '../routes/app_routes.dart';
+
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  _LoginScreenState createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final AuthService _authService = AuthService();
+
+  String _email = '';
+  String _password = '';
+  bool _isLoading = false;
+  String _errorMessage = '';
+
+  void _login() async {
+    if (_formKey.currentState!.validate()) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = '';
+      });
+      try {
+        final user = await _authService.signIn(_email, _password);
+        if (user != null) {
+          Navigator.pushReplacementNamed(context, AppRoutes.home);
+        } else {
+          setState(() {
+            _errorMessage = "Login failed. Please try again.";
+          });
+        }
+      } catch (e) {
+        setState(() {
+          _errorMessage = e.toString();
+        });
+      } finally {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Widget _buildError() {
+    if (_errorMessage.isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(8.0),
+        child: Text(_errorMessage, style: const TextStyle(color: Colors.red)),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Login to SmileAtlas')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            _buildError(),
+            Form(
+              key: _formKey,
+              child: Column(
+                children: [
+                  TextFormField(
+                    decoration: const InputDecoration(labelText: 'Email'),
+                    validator: (value) =>
+                        (value == null || value.isEmpty) ? 'Please enter email' : null,
+                    onChanged: (value) => _email = value,
+                    keyboardType: TextInputType.emailAddress,
+                  ),
+                  TextFormField(
+                    decoration: const InputDecoration(labelText: 'Password'),
+                    validator: (value) => (value == null || value.length < 6)
+                        ? 'Enter at least 6 characters'
+                        : null,
+                    obscureText: true,
+                    onChanged: (value) => _password = value,
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: _isLoading ? null : _login,
+                    child: _isLoading
+                        ? const CircularProgressIndicator(
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          )
+                        : const Text('Login'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\screens\onboarding_screen.dart
+==================================================
+
+// lib/src/screens/onboarding_screen.dart
+import 'package:flutter/material.dart';
+import '../utils/constants.dart';
+import '../routes/app_routes.dart';
+
+class OnboardingScreen extends StatefulWidget {
+  const OnboardingScreen({super.key});
+
+  @override
+  _OnboardingScreenState createState() => _OnboardingScreenState();
+}
+
+class _OnboardingScreenState extends State<OnboardingScreen> {
+  final PageController _pageController = PageController();
+  int currentPage = 0;
+
+  List<Widget> onboardingPages = [
+    const OnboardingPage(
+      image: 'assets/images/onboard_welcome.png',
+      title: "Welcome to SmileAtlas",
+      description: "Mapping your family’s smile journey with precision and care.",
+    ),
+    const OnboardingPage(
+      image: 'assets/images/onboard_personalize.png',
+      title: "Personalize Your Experience",
+      description: "Create profiles for every family member and track progress over time.",
+    ),
+    const OnboardingPage(
+      image: 'assets/images/onboard_secure.png',
+      title: "Secure & Intelligent",
+      description: "Leverage AI-powered analysis for insights and reminders.",
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Column(
+        children: [
+          Expanded(
+            child: PageView.builder(
+              controller: _pageController,
+              itemCount: onboardingPages.length,
+              onPageChanged: (index) => setState(() => currentPage = index),
+              itemBuilder: (context, index) => onboardingPages[index],
+            ),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(onboardingPages.length, (index) {
+              return AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                margin: const EdgeInsets.symmetric(horizontal: 5),
+                width: currentPage == index ? 12 : 8,
+                height: currentPage == index ? 12 : 8,
+                decoration: BoxDecoration(
+                  color: currentPage == index ? AppColors.accent : Colors.grey,
+                  shape: BoxShape.circle,
+                ),
+              );
+            }),
+          ),
+          const SizedBox(height: AppSpacing.medium),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.medium),
+            child: ElevatedButton(
+              onPressed: () {
+                if (currentPage == onboardingPages.length - 1) {
+                  Navigator.pushReplacementNamed(context, AppRoutes.login);
+                } else {
+                  _pageController.nextPage(
+                      duration: const Duration(milliseconds: 300), curve: Curves.easeIn);
+                }
+              },
+              child: Text(currentPage == onboardingPages.length - 1 ? "Get Started" : "Next"),
+            ),
+          ),
+          const SizedBox(height: AppSpacing.large),
+        ],
+      ),
+    );
+  }
+}
+
+class OnboardingPage extends StatelessWidget {
+  final String image;
+  final String title;
+  final String description;
+
+  const OnboardingPage({super.key, required this.image, required this.title, required this.description});
+  
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.medium),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Image.asset(image, height: 250),
+          const SizedBox(height: AppSpacing.large),
+          Text(title, style: AppTypography.header, textAlign: TextAlign.center),
+          const SizedBox(height: AppSpacing.small),
+          Text(description, style: AppTypography.body, textAlign: TextAlign.center),
+        ],
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\screens\profile_screen.dart
+==================================================
+
+// C:\Users\USER\smileatlas_app\lib\src\screens\profile_screen.dart
+
+import 'package:flutter/material.dart';
+import '../models/user.dart';
+import '../widgets/dental_map_widget.dart';
+import '../utils/constants.dart';
+import '../routes/app_routes.dart';
+
+class ProfileScreen extends StatelessWidget {
+  // Make this nullable to handle cases where no valid user was passed
+  final UserModel? member;
+
+  const ProfileScreen({Key? key, this.member}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    // Fallback if member is null
+    final currentMember = member ?? UserModel(
+      id: 'unknown',
+      name: 'Unknown',
+      profileImage: 'assets/images/default.png',
+    );
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("${currentMember.name}'s Profile"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.edit),
+            onPressed: () {
+              // Go to add/edit member, passing the current user
+              Navigator.pushNamed(
+                context,
+                AppRoutes.addEditMember,
+                arguments: currentMember,
+              );
+            },
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(AppSpacing.medium),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Display basic member info
+            Row(
+              children: [
+                CircleAvatar(
+                  backgroundImage: AssetImage(currentMember.profileImage),
+                  radius: 40,
+                ),
+                const SizedBox(width: AppSpacing.medium),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(currentMember.name, style: AppTypography.header),
+                      if (currentMember.latestAnalysis != null &&
+                          currentMember.latestAnalysis!.teeth.isNotEmpty)
+                        Text(
+                          'Teeth Analyzed: ${currentMember.latestAnalysis!.teeth.length}',
+                          style: AppTypography.caption,
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.large),
+
+            // Quick header for analysis or a "Start New" button if none
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text("Dental Analysis", style: AppTypography.subheader),
+                if (currentMember.latestAnalysis == null)
+                  TextButton(
+                    onPressed: () {
+                      // Trigger new analysis by going to upload images
+                      Navigator.pushNamed(
+                        context,
+                        AppRoutes.uploadImage,
+                        arguments: currentMember.id,
+                      );
+                    },
+                    child: const Text("Start New Analysis"),
+                  ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.medium),
+
+            // Show the dental map if an analysis is present
+            Expanded(
+              child: Center(
+                child: currentMember.latestAnalysis == null
+                    ? const Text('No recent analysis')
+                    : DentalMapWidget(analysis: currentMember.latestAnalysis),
+              ),
+            ),
+          ],
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        // Another route to upload images
+        onPressed: () {
+          Navigator.pushNamed(
+            context,
+            AppRoutes.uploadImage,
+            arguments: currentMember.id,
+          );
+        },
+        child: const Icon(Icons.add_a_photo),
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\screens\settings_screen.dart
+==================================================
+
+// lib/src/screens/settings_screen.dart
+
+import 'package:flutter/material.dart';
+import 'package:easy_localization/easy_localization.dart'; // For language changes
+import '../utils/constants.dart';
+
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  bool notificationsEnabled = true; // Example toggle
+  Locale selectedLocale = const Locale('en'); // Default
+
+  @override
+  void initState() {
+    super.initState();
+    // Load initial user preferences, e.g. from SharedPreferences
+    selectedLocale = context.locale;
+  }
+
+  void _onLocaleChange(Locale locale) {
+    setState(() {
+      selectedLocale = locale;
+    });
+    context.setLocale(locale);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(tr('settings.title')), // e.g. "Settings" / "Ajustes"
+      ),
+      body: ListView(
+        children: [
+          // Language selection
+          ListTile(
+            title: Text(tr('settings.language')),
+            trailing: DropdownButton<Locale>(
+              value: selectedLocale,
+              items: const [
+                DropdownMenuItem(
+                  value: Locale('en'),
+                  child: Text('English'),
+                ),
+                DropdownMenuItem(
+                  value: Locale('es'),
+                  child: Text('Español'),
+                ),
+              ],
+              onChanged: (locale) => _onLocaleChange(locale!),
+            ),
+          ),
+          // Notifications toggle
+          SwitchListTile(
+            title: Text(tr('settings.notifications')),
+            value: notificationsEnabled,
+            onChanged: (val) {
+              setState(() => notificationsEnabled = val);
+              // Save to user preferences
+            },
+          ),
+          // Dark / Light theme toggle or theme selection
+          // ...
+        ],
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\screens\tooth_detail_screen.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import '../models/dental_analysis.dart';
+import '../utils/constants.dart';
+
+class ToothDetailScreen extends StatefulWidget {
+  final Tooth tooth;
+  /// Expects two image paths/URLs: [currentScan, previousScan]
+  final List<String> scanImages;
+  const ToothDetailScreen({super.key, required this.tooth, required this.scanImages});
+
+  @override
+  _ToothDetailScreenState createState() => _ToothDetailScreenState();
+}
+
+class _ToothDetailScreenState extends State<ToothDetailScreen> {
+  final PageController _pageController = PageController();
+  int _currentPage = 0;
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  Widget _buildDotsIndicator() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: List.generate(widget.scanImages.length, (index) {
+        return Container(
+          margin: const EdgeInsets.all(4.0),
+          width: _currentPage == index ? 12.0 : 8.0,
+          height: _currentPage == index ? 12.0 : 8.0,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _currentPage == index ? AppColors.accent : Colors.grey,
+          ),
+        );
+      }),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("Detail for ${widget.tooth.professionalName}"),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: PageView.builder(
+              controller: _pageController,
+              itemCount: widget.scanImages.length,
+              onPageChanged: (index) {
+                setState(() {
+                  _currentPage = index;
+                });
+              },
+              itemBuilder: (context, index) {
+                return InteractiveViewer(
+                  panEnabled: true,
+                  minScale: 1,
+                  maxScale: 5,
+                  child: Image.asset(
+                    widget.scanImages[index],
+                    fit: BoxFit.contain,
+                  ),
+                );
+              },
+            ),
+          ),
+          _buildDotsIndicator(),
+          const SizedBox(height: AppSpacing.medium),
+        ],
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\screens\upload_image_screen.dart
+==================================================
+
+// C:\Users\USER\smileatlas_app\lib\src\screens\upload_image_screen.dart
+
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import '../services/api_service.dart';
+import '../utils/constants.dart';
+
+class UploadImageScreen extends StatefulWidget {
+  final String memberId;
+
+  const UploadImageScreen({Key? key, required this.memberId}) : super(key: key);
+
+  @override
+  State<UploadImageScreen> createState() => _UploadImageScreenState();
+}
+
+class _UploadImageScreenState extends State<UploadImageScreen> {
+  final ImagePicker _picker = ImagePicker();
+  final ApiService _apiService = ApiService();
+
+  File? _frontImage;
+  File? _upperImage;
+  File? _lowerImage;
+  bool _isUploading = false;
+  String _errorMessage = '';
+
+  Future<void> _pickImage(String type) async {
+    final pickedFile = await _picker.pickImage(source: ImageSource.camera);
+    if (pickedFile != null) {
+      setState(() {
+        final file = File(pickedFile.path);
+        if (type == 'front') {
+          _frontImage = file;
+        } else if (type == 'upper') {
+          _upperImage = file;
+        } else if (type == 'lower') {
+          _lowerImage = file;
+        }
+      });
+    }
+  }
+
+  Future<void> _uploadImages() async {
+    if (_frontImage == null || _upperImage == null || _lowerImage == null) {
+      setState(() {
+        _errorMessage = "Please capture all three images before uploading.";
+      });
+      return;
+    }
+    setState(() {
+      _isUploading = true;
+      _errorMessage = '';
+    });
+    try {
+      // This calls your custom API endpoint. Make sure it's implemented:
+      final result = await _apiService.uploadDentalImages(
+        _frontImage!,
+        _upperImage!,
+        _lowerImage!,
+        widget.memberId,
+      );
+      // Show success
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Images uploaded successfully.")),
+      );
+      Navigator.pop(context);
+    } catch (e) {
+      setState(() {
+        _errorMessage = e.toString();
+      });
+    } finally {
+      setState(() {
+        _isUploading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("Upload Dental Images - ${widget.memberId}"),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(AppSpacing.medium),
+        child: SingleChildScrollView(
+          child: Column(
+            children: [
+              if (_errorMessage.isNotEmpty)
+                Text(
+                  _errorMessage,
+                  style: const TextStyle(color: AppColors.error),
+                ),
+              const SizedBox(height: AppSpacing.medium),
+
+              // Front
+              _frontImage != null
+                  ? Image.file(_frontImage!, height: 150)
+                  : const Text("No front image selected"),
+              ElevatedButton(
+                onPressed: () => _pickImage('front'),
+                child: const Text("Capture Front Image"),
+              ),
+              const SizedBox(height: AppSpacing.medium),
+
+              // Upper
+              _upperImage != null
+                  ? Image.file(_upperImage!, height: 150)
+                  : const Text("No upper image selected"),
+              ElevatedButton(
+                onPressed: () => _pickImage('upper'),
+                child: const Text("Capture Upper Image"),
+              ),
+              const SizedBox(height: AppSpacing.medium),
+
+              // Lower
+              _lowerImage != null
+                  ? Image.file(_lowerImage!, height: 150)
+                  : const Text("No lower image selected"),
+              ElevatedButton(
+                onPressed: () => _pickImage('lower'),
+                child: const Text("Capture Lower Image"),
+              ),
+              const SizedBox(height: AppSpacing.large),
+
+              ElevatedButton(
+                onPressed: _isUploading ? null : _uploadImages,
+                child: _isUploading
+                    ? const CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      )
+                    : const Text("Upload & Analyze"),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+==================================================
+File: lib\src\services\api_service.dart
+==================================================
+
+import 'dart:convert';
+import 'dart:io';
+import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
+class ApiService {
+  final String baseUrl = dotenv.env['API_BASE_URL']!;
+
+  /// Uploads three dental images for analysis.
+  Future<Map<String, dynamic>> uploadDentalImages(
+      File frontImage, File upperImage, File lowerImage, String memberId) async {
+    final uri = Uri.parse("$baseUrl/upload_images");
+    var request = http.MultipartRequest('POST', uri);
+    request.fields['memberId'] = memberId;
+    request.files.add(await http.MultipartFile.fromPath('front_image', frontImage.path));
+    request.files.add(await http.MultipartFile.fromPath('upper_image', upperImage.path));
+    request.files.add(await http.MultipartFile.fromPath('lower_image', lowerImage.path));
+    request.headers['Authorization'] = 'Bearer ${dotenv.env['API_KEY']}';
+
+    var response = await request.send();
+    if (response.statusCode == 200) {
+      final responseData = await response.stream.bytesToString();
+      return json.decode(responseData);
+    } else {
+      throw Exception('Failed to upload images. Status code: ${response.statusCode}');
+    }
+  }
+
+  /// Optionally, fetch analysis by image ID.
+  Future<Map<String, dynamic>> fetchAnalysis(String imageId) async {
+    final uri = Uri.parse("$baseUrl/analysis/$imageId");
+    final response = await http.get(uri, headers: {
+      'Authorization': 'Bearer ${dotenv.env['API_KEY']}'
+    });
+    if (response.statusCode == 200) {
+      return json.decode(response.body);
+    } else {
+      throw Exception('Failed to load analysis');
+    }
+  }
+}
+
+==================================================
+File: lib\src\services\auth_service.dart
+==================================================
+
+// lib/src/services/auth_service.dart
+import 'package:firebase_auth/firebase_auth.dart';
+
+class AuthService {
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+
+  // Sign in with email and password.
+  Future<User?> signIn(String email, String password) async {
+    try {
+      UserCredential result = await _auth.signInWithEmailAndPassword(
+          email: email, password: password);
+      return result.user;
+    } catch (e) {
+      throw Exception("Authentication failed: $e");
+    }
+  }
+
+  // Register new user.
+  Future<User?> register(String email, String password) async {
+    try {
+      UserCredential result = await _auth.createUserWithEmailAndPassword(
+          email: email, password: password);
+      return result.user;
+    } catch (e) {
+      throw Exception("Registration failed: $e");
+    }
+  }
+
+  // Sign out.
+  Future<void> signOut() async {
+    await _auth.signOut();
+  }
+}
+
+==================================================
+File: lib\src\services\dental_analysis_service.dart
+==================================================
+
+
+==================================================
+File: lib\src\services\dental_image_service.dart
+==================================================
+
+import 'dart:io';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:path/path.dart' as path;
+import 'package:uuid/uuid.dart';
+import '../models/dental_image.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class DentalImageService {
+  final FirebaseStorage _storage = FirebaseStorage.instance;
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final _uuid = const Uuid();
+
+  Future<DentalImage> uploadImage({
+    required File imageFile,
+    required String memberId,
+    required DentalImageType type,
+    Map<String, dynamic>? metadata,
+  }) async {
+    try {
+      // Generate unique ID for the image
+      final String imageId = _uuid.v4();
+      final String extension = path.extension(imageFile.path);
+      final String fileName = '$imageId$extension';
+      
+      // Create storage reference
+      final storageRef = _storage.ref().child('dental_images/$memberId/$fileName');
+      
+      // Upload the file
+      await storageRef.putFile(
+        imageFile,
+        SettableMetadata(
+          contentType: 'image/jpeg',
+          customMetadata: {
+            'memberId': memberId,
+            'type': type.value,
+            'uploadDate': DateTime.now().toIso8601String(),
+          },
+        ),
+      );
+
+      // Get download URL
+      final String downloadUrl = await storageRef.getDownloadURL();
+
+      // Create DentalImage object
+      final dentalImage = DentalImage(
+        id: imageId,
+        url: downloadUrl,
+        type: type,
+        captureDate: DateTime.now(),
+        memberId: memberId,
+        metadata: metadata,
+        localPath: imageFile.path,
+        isProcessed: false,
+      );
+
+      // Save to Firestore
+      await _firestore
+          .collection('dental_images')
+          .doc(imageId)
+          .set(dentalImage.toJson());
+
+      return dentalImage;
+    } catch (e) {
+      throw Exception('Failed to upload dental image: $e');
+    }
+  }
+
+  Future<List<DentalImage>> getMemberImages(String memberId) async {
+    try {
+      final QuerySnapshot snapshot = await _firestore
+          .collection('dental_images')
+          .where('memberId', isEqualTo: memberId)
+          .orderBy('captureDate', descending: true)
+          .get();
+
+      return snapshot.docs
+          .map((doc) => DentalImage.fromJson(doc.data() as Map<String, dynamic>))
+          .toList();
+    } catch (e) {
+      throw Exception('Failed to fetch member images: $e');
+    }
+  }
+
+  Future<void> deleteImage(DentalImage image) async {
+    try {
+      // Delete from Storage
+      final storageRef = _storage.refFromURL(image.url);
+      await storageRef.delete();
+
+      // Delete from Firestore
+      await _firestore.collection('dental_images').doc(image.id).delete();
+
+      // Delete local file if it exists
+      if (image.localPath != null) {
+        final localFile = File(image.localPath!);
+        if (await localFile.exists()) {
+          await localFile.delete();
+        }
+      }
+    } catch (e) {
+      throw Exception('Failed to delete dental image: $e');
+    }
+  }
+
+  Future<void> markImageAsProcessed(String imageId, String analysisId) async {
+    try {
+      await _firestore.collection('dental_images').doc(imageId).update({
+        'isProcessed': true,
+        'analysisId': analysisId,
+      });
+    } catch (e) {
+      throw Exception('Failed to update image processing status: $e');
+    }
+  }
+
+  Future<List<DentalImage>> getUnprocessedImages() async {
+    try {
+      final QuerySnapshot snapshot = await _firestore
+          .collection('dental_images')
+          .where('isProcessed', isEqualTo: false)
+          .get();
+
+      return snapshot.docs
+          .map((doc) => DentalImage.fromJson(doc.data() as Map<String, dynamic>))
+          .toList();
+    } catch (e) {
+      throw Exception('Failed to fetch unprocessed images: $e');
+    }
+  }
+}
+==================================================
+File: lib\src\services\firestore_service.dart
+==================================================
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../models/user.dart';
+
+class FirestoreService {
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+
+  // Create or update a user
+  Future<void> setUser(UserModel user) async {
+    await _db.collection('users').doc(user.id).set(user.toJson(), SetOptions(merge: true));
+  }
+
+  // Retrieve a user by ID
+  Future<UserModel?> getUser(String userId) async {
+    DocumentSnapshot doc = await _db.collection('users').doc(userId).get();
+    if (doc.exists) {
+      return UserModel.fromJson(doc.data() as Map<String, dynamic>);
+    }
+    return null;
+  }
+
+  // Delete a user
+  Future<void> deleteUser(String userId) async {
+    await _db.collection('users').doc(userId).delete();
+  }
+}
+
+==================================================
+File: lib\src\utils\constants.dart
+==================================================
+
+import 'package:flutter/material.dart';
+
+class AppColors {
+  // Primary colors
+  static const Color primary = Color(0xFF1E88E5);    // Deep Blue
+  static const Color accent = Color(0xFFFF6F61);     // Vibrant Coral
+  static const Color background = Color(0xFFF5F5F5); // Light Gray
+  
+  // Status colors
+  static const Color error = Color(0xFFE53935);      // Error Red
+  static const Color success = Color(0xFF43A047);    // Success Green
+  static const Color warning = Color(0xFFFFA726);    // Warning Orange
+  static const Color info = Color(0xFF2196F3);       // Info Blue
+  
+  // Text colors
+  static const Color textPrimary = Color(0xFF212121);
+  static const Color textSecondary = Color(0xFF757575);
+  static const Color textDisabled = Color(0xFFBDBDBD);
+  
+  // UI colors
+  static const Color divider = Color(0xFFBDBDBD);
+  static const Color cardBackground = Colors.white;
+  static const Color shimmerBase = Color(0xFFE0E0E0);
+  static const Color shimmerHighlight = Color(0xFFF5F5F5);
+  static const Color overlay = Color(0x80000000);
+  
+  // Dental specific colors
+  static const Color healthyTooth = Color(0xFF81C784);
+  static const Color concernTooth = Color(0xFFFFB74D);
+  static const Color criticalTooth = Color(0xFFE57373);
+  static const Color untrackedTooth = Color(0xFFE0E0E0);
+}
+
+class AppTypography {
+  static const String _fontFamily = 'Roboto';
+
+  static const TextStyle display = TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 34,
+    fontWeight: FontWeight.bold,
+    color: AppColors.textPrimary,
+    letterSpacing: 0.25,
+  );
+
+  static const TextStyle header = TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 24,
+    fontWeight: FontWeight.bold,
+    color: AppColors.textPrimary,
+    letterSpacing: 0.15,
+  );
+  
+  static const TextStyle subheader = TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 20,
+    fontWeight: FontWeight.w500,
+    color: AppColors.textPrimary,
+    letterSpacing: 0.15,
+  );
+  
+  static const TextStyle body = TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 16,
+    color: AppColors.textPrimary,
+    letterSpacing: 0.5,
+  );
+  
+  static const TextStyle bodyBold = TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 16,
+    fontWeight: FontWeight.bold,
+    color: AppColors.textPrimary,
+    letterSpacing: 0.5,
+  );
+  
+  static const TextStyle caption = TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 14,
+    color: AppColors.textSecondary,
+    letterSpacing: 0.4,
+  );
+  
+  static const TextStyle button = TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 16,
+    fontWeight: FontWeight.w500,
+    letterSpacing: 1.25,
+  );
+  
+  static const TextStyle overline = TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 12,
+    fontWeight: FontWeight.w500,
+    color: AppColors.textSecondary,
+    letterSpacing: 1.5,
+  );
+}
+
+class AppSpacing {
+  static const double xxxsmall = 2.0;
+  static const double xxsmall = 4.0;
+  static const double xsmall = 8.0;
+  static const double small = 12.0;
+  static const double medium = 16.0;
+  static const double large = 24.0;
+  static const double xlarge = 32.0;
+  static const double xxlarge = 48.0;
+  static const double xxxlarge = 64.0;
+  
+  // Specific spacing for dental map
+  static const double toothSpacing = 6.0;
+  static const double jawSpacing = 20.0;
+}
+
+class AppDurations {
+  static const Duration fastest = Duration(milliseconds: 150);
+  static const Duration fast = Duration(milliseconds: 250);
+  static const Duration medium = Duration(milliseconds: 350);
+  static const Duration slow = Duration(milliseconds: 700);
+  static const Duration pageTransition = Duration(milliseconds: 300);
+  static const Duration splashScreen = Duration(seconds: 2);
+}
+
+class AppBorderRadius {
+  static const double small = 4.0;
+  static const double medium = 8.0;
+  static const double large = 12.0;
+  static const double xlarge = 16.0;
+  
+  static BorderRadius get smallAll => BorderRadius.circular(small);
+  static BorderRadius get mediumAll => BorderRadius.circular(medium);
+  static BorderRadius get largeAll => BorderRadius.circular(large);
+  static BorderRadius get xlargeAll => BorderRadius.circular(xlarge);
+  
+  static const BorderRadius smallTop = BorderRadius.vertical(
+    top: Radius.circular(small),
+  );
+  
+  static const BorderRadius mediumTop = BorderRadius.vertical(
+    top: Radius.circular(medium),
+  );
+}
+
+class AppConfig {
+  // API Endpoints
+  static const String apiVersion = 'v1';
+  static const Duration apiTimeout = Duration(seconds: 30);
+  
+  // Cache Configuration
+  static const Duration imageCacheDuration = Duration(days: 7);
+  static const int maxCachedImages = 100;
+  
+  // Analytics
+  static const Duration sessionTimeout = Duration(minutes: 30);
+  static const bool analyticsEnabled = true;
+  
+  // Feature Flags
+  static const bool enablePushNotifications = true;
+  static const bool enableImageSharing = true;
+  static const bool enableCloudBackup = true;
+  
+  // Dental Specific
+  static const int maxFamilyMembers = 6;
+  static const Duration analysisTimeout = Duration(minutes: 5);
+  static const int maxImagesPerAnalysis = 3;
+}
+==================================================
+File: lib\src\utils\validators.dart
+==================================================
+
+
+==================================================
+File: lib\src\widgets\dental_map_widget.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import '../models/dental_analysis.dart';
+import '../utils/constants.dart';
+
+class DentalMapWidget extends StatelessWidget {
+  final DentalAnalysis? analysis;
+  
+  const DentalMapWidget({
+    super.key,
+    required this.analysis,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (analysis == null) {
+      return const Center(
+        child: Text('No dental analysis available'),
+      );
+    }
+
+    return CustomPaint(
+      size: const Size(double.infinity, 200),
+      painter: _DentalMapPainter(analysis: analysis!),
+    );
+  }
+}
+
+class _DentalMapPainter extends CustomPainter {
+  final DentalAnalysis analysis;
+  
+  _DentalMapPainter({
+    required this.analysis,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Draw the dental arch schematic
+    final paint = Paint()
+      ..color = Colors.grey.shade400
+      ..strokeWidth = 3
+      ..style = PaintingStyle.stroke;
+    
+    final path = Path();
+    path.moveTo(20, size.height * 0.8);
+    path.quadraticBezierTo(size.width / 2, 0, size.width - 20, size.height * 0.8);
+    canvas.drawPath(path, paint);
+
+    // Overlay markers computed from analysis
+    final markerPaint = Paint()
+      ..color = AppColors.accent
+      ..style = PaintingStyle.fill;
+    
+    for (var marker in analysis.markers) {
+      canvas.drawCircle(
+        Offset(marker.dx * size.width, marker.dy * size.height), 
+        6, 
+        markerPaint
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+==================================================
+File: lib\src\widgets\image_picker_widget.dart
+==================================================
+
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import '../utils/constants.dart';
+
+class ImagePickerWidget extends StatefulWidget {
+  final Function(File) onImageSelected;
+  const ImagePickerWidget({super.key, required this.onImageSelected});
+  
+  @override
+  _ImagePickerWidgetState createState() => _ImagePickerWidgetState();
+}
+
+class _ImagePickerWidgetState extends State<ImagePickerWidget> {
+  final ImagePicker _picker = ImagePicker();
+  File? _selectedImage;
+
+  Future<void> _pickImage(ImageSource source) async {
+    final pickedFile = await _picker.pickImage(source: source);
+    if (pickedFile != null) {
+      setState(() {
+        _selectedImage = File(pickedFile.path);
+      });
+      widget.onImageSelected(_selectedImage!);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _selectedImage != null
+            ? Image.file(_selectedImage!, height: 150)
+            : Container(
+                height: 150,
+                color: Colors.grey.shade300,
+                child: const Center(child: Text("No image selected")),
+              ),
+        const SizedBox(height: AppSpacing.medium),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            ElevatedButton(
+              onPressed: () => _pickImage(ImageSource.camera),
+              child: const Text("Camera"),
+            ),
+            ElevatedButton(
+              onPressed: () => _pickImage(ImageSource.gallery),
+              child: const Text("Gallery"),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+==================================================
+File: lib\src\widgets\profile_card.dart
+==================================================
+
+import 'package:flutter/material.dart';
+import '../utils/constants.dart';
+
+class ProfileCard extends StatelessWidget {
+  final String name;
+  final String imagePath;
+  final VoidCallback onTap;
+  
+  const ProfileCard({super.key, 
+    required this.name,
+    required this.imagePath,
+    required this.onTap,
+  });
+  
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.medium),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircleAvatar(
+                backgroundImage: AssetImage(imagePath),
+                radius: 40,
+              ),
+              const SizedBox(height: AppSpacing.medium),
+              Text(
+                name,
+                style: AppTypography.header,
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+==================================================
+File: .env
+==================================================
+
+# API Configuration
+API_BASE_URL=https://api.smileatlas.com
+API_KEY=your_production_api_key
+API_VERSION=v1
+
+# Firebase Configuration
+FIREBASE_API_KEY=your_firebase_api_key
+FIREBASE_AUTH_DOMAIN=smileatlas.firebaseapp.com
+FIREBASE_PROJECT_ID=smileatlas-prod
+FIREBASE_STORAGE_BUCKET=smileatlas-prod.appspot.com
+FIREBASE_MESSAGING_SENDER_ID=your_sender_id
+FIREBASE_APP_ID=your_app_id
+
+# Analytics Configuration
+ANALYTICS_ENABLED=true
+CRASH_REPORTING_ENABLED=true
+
+# Feature Flags
+ENABLE_PUSH_NOTIFICATIONS=true
+ENABLE_IMAGE_SHARING=true
+ENABLE_CLOUD_BACKUP=true
+
+# Cache Configuration
+MAX_CACHED_IMAGES=100
+IMAGE_CACHE_DURATION_DAYS=7
+==================================================
+File: .gitignore
+==================================================
+
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+==================================================
+File: pubspec.yaml
+==================================================
+
+name: smileatlas_app
+description: "SmileAtlas - Family Dental Tracking Application"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.7.0
+  flutter: ">=3.16.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI Components
+  cupertino_icons: ^1.0.8
+  flutter_svg: ^2.0.9
+  cached_network_image: ^3.3.1
+  shimmer: ^3.0.0
+  photo_view: ^0.14.0
+  flutter_spinkit: ^5.2.0
+
+  # State Management
+  provider: ^6.1.1
+  
+  # Firebase
+  firebase_core: ^2.24.2
+  firebase_auth: ^4.16.0
+  cloud_firestore: ^4.14.0
+  firebase_storage: ^11.6.0
+  firebase_analytics: ^10.8.0
+  firebase_crashlytics: ^3.4.9
+  
+  # Network & Storage
+  http: ^1.1.2
+  dio: ^5.4.0
+  image_picker: ^1.0.7
+  path_provider: ^2.1.2
+  shared_preferences: ^2.2.2
+  
+  # Configuration & Utils
+  flutter_dotenv: ^5.1.0
+  intl: ^0.19.0
+  uuid: ^4.3.3
+  logger: ^2.0.2+1
+  connectivity_plus: ^5.0.2
+  package_info_plus: ^5.0.1
+
+  # Image Processing
+  image: ^4.1.3
+  exif: ^3.3.0
+  easy_localization: ^3.0.7+1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+  build_runner: ^2.4.8
+  mockito: ^5.4.4
+  flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.3.9
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - .env
+    - assets/images/
+    - assets/icons/
+    - assets/animations/
+
+  fonts:
+    - family: Roboto
+      fonts:
+        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Roboto-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Roboto-Bold.ttf
+          weight: 700
+
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/icons/app_icon.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icons/app_icon_foreground.png"
+
+flutter_native_splash:
+  color: "#FFFFFF"
+  image: assets/images/splash.png
+  android_12:
+    image: assets/images/splash_android12.png
+    color: "#FFFFFF"
+==================================================
+File: analysis_options.yaml
+==================================================
+
+# This file configures the analyzer, which statically analyzes Dart code to
+# check for errors, warnings, and lints.
+#
+# The issues identified by the analyzer are surfaced in the UI of Dart-enabled
+# IDEs (https://dart.dev/tools#ides-and-editors). The analyzer can also be
+# invoked from the command line by running `flutter analyze`.
+
+# The following line activates a set of recommended lints for Flutter apps,
+# packages, and plugins designed to encourage good coding practices.
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  # The lint rules applied to this project can be customized in the
+  # section below to disable rules from the `package:flutter_lints/flutter.yaml`
+  # included above or to enable additional rules. A list of all available lints
+  # and their documentation is published at https://dart.dev/lints.
+  #
+  # Instead of disabling a lint rule for the entire project in the
+  # section below, it can also be suppressed for a single line of code
+  # or a specific dart file by using the `// ignore: name_of_lint` and
+  # `// ignore_for_file: name_of_lint` syntax on the line or in the file
+  # producing the lint.
+  rules:
+    # avoid_print: false  # Uncomment to disable the `avoid_print` rule
+    # prefer_single_quotes: true  # Uncomment to enable the `prefer_single_quotes` rule
+
+# Additional information about this file can be found at
+# https://dart.dev/guides/language/analysis-options

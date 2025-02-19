@@ -1,0 +1,20 @@
+{
+    "app_title": "סמיילאטלס",
+    "settings": {
+      "title": "הגדרות",
+      "language": "שפה",
+      "theme": "ערכת נושא",
+      "notifications": "התראות"
+    },
+    "welcome": "ברוכים הבאים ל-SmileAtlas",
+    "onboarding": {
+      "page1_title": "ברוכים הבאים",
+      "page1_desc": "מיפוי מסע החיוך של המשפחה שלכם בדיוק רב."
+    },
+    "login_screen": {
+      "email_label": "אימייל",
+      "password_label": "סיסמה",
+      "login_button": "התחבר"
+    }
+  }
+  
